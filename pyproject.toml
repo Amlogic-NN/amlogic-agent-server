@@ -1,0 +1,87 @@
+[build-system]
+requires = ["setuptools>=80", "cython>=3.0", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "amlllm-openai-server"
+dynamic = ["version"]
+description = "Open AI API compatiable LLM server for Amlogic Device"
+authors = [
+    { name = "Chen ZHU", email = "chen.zhu@amlogic.com"},
+    { name = "Dian YUAN", email = "Dian.Yuan@amlogic.com" }
+]
+readme = "README.md"
+requires-python = ">=3.11"
+license-files = ["LICEN[CS]E*"]
+dependencies = ["fastapi>=0.115,<1.0",
+        "PyYAML>=6.0,<7.0",
+        "uvicorn>=0.30,<1.0",
+        "json-repair ~= 0.59.6",
+        "jinja2>=3.1,<4.0",
+        "jsonschema ~= 4.26.0",
+        "pydantic ~= 2.13.4",
+        "httpx>=0.27,<1.0",
+        "openai>=1.0",
+        "matplotlib>=3.9",
+        "numpy>=1.26",
+        "Pillow>=10.0",
+        
+        ]
+
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Cython",
+    "Programming Language :: C",
+    "Programming Language :: C++",
+    "Operating System :: POSIX :: Linux",
+    "Framework :: FastAPI",
+    "Operating System :: POSIX :: Linux",
+
+]
+
+
+[project.urls]
+Homepage = "https://github.com/Amlogic-NN/amlogic-llm-server"
+Repository = "https://github.com/Amlogic-NN/amlogic-llm-server"
+Issues = "https://github.com/Amlogic-NN/amlogic-llm-server/issues"
+
+
+
+[tool.setuptools.packages.find]
+include = ["amlllm_openai_server*"]
+
+[tool.setuptools]
+ext-modules = [
+   
+    {name = "amlllm_openai_server.aml_llmsdk._llmsdk", sources = ["proxy_server/aml_llmsdk/_llmsdk.pyx", 
+                        "proxy_server/aml_llmsdk/llmsdk_func.c"], include-dirs = ["proxy_server/aml_llmsdk/"] },
+
+
+]
+exclude-package-data = { amlllm_openai_server = ["*.pyx", "*.c", "*.py", "*.cpp", "*.h", "*.hpp"]}
+
+[tool.cython]
+language_level = "3"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0.3",
+    "cython>=3.0"
+]
+
+benchmark = [
+    "datasets>=3.0",
+    "tqdm>=4.0",
+    "numpy>=1.26",
+]
+
+[project.scripts]
+aml_openai_server = "amlllm_openai_server.cli:main"
+
+[tool.setuptools_scm]
+version_file = "amlllm_openai_server/__version__.py"
+write_to_source = true

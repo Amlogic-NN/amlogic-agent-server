@@ -1,0 +1,15 @@
+[Unit]
+Description=Amlogic OpenAI Server
+After=network.target
+
+[Service]
+User=root
+Group=root
+WorkingDirectory=/opt/amlllm_openai_server
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+ExecStart=/usr/local/bin/uv run aml_openai_server
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
