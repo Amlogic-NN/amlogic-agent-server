@@ -1,4 +1,4 @@
-# Amlogic LLM Server
+# Amlogic Agent Server
 
 An OpenAI-compatible LLM serving layer for Amlogic devices. It allows existing
 Agent applications and OpenAI SDK clients to use an on-device NPU model while
