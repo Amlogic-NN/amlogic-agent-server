@@ -23,7 +23,7 @@ The server is designed for **local-first Agent applications**:
 <p align="center">
   <img
     src="./doc/architecture.png"
-    alt="Amlogic LLM Server edge-cloud Agent architecture"
+    alt="Amlogic Agent Server edge-cloud Agent architecture"
     width="100%"
   />
 </p>
@@ -32,7 +32,7 @@ The architecture is divided into three functional layers plus a routing
 decision flow:
 
 1. **Agent Applications** provide user-facing workflows, memory, channels, and tools.
-2. **Amlogic LLM Server** exposes the OpenAI-compatible API and contains the
+2. **Amlogic Agent Server** exposes the OpenAI-compatible API and contains the
    prompt, tool-calling, routing, sampling, and multi-turn inference logic.
 3. **Edge-Cloud Execution** runs simple and privacy-sensitive workloads on the
    Amlogic NPU and optionally forwards suitable requests to a cloud LLM.
@@ -48,7 +48,7 @@ can call an OpenAI-compatible API can use it as its model endpoint.
 |-----------|----------------|------------------|
 | **Vertical Agents** | Package domain-specific skills, tools, prompts, and deterministic workflows for a defined business scenario | Meeting summary, shopping assistant, AI NAS/photo search, customer service, document assistant |
 | **General Agent** | Provides open-ended conversation, generic tool use, memory, and multiple user channels | Personal assistant, chat application, voice assistant, multi-tool automation |
-| **Agent Runtime** | Owns the Agent loop outside the LLM server: sends messages, executes requested tools, returns tool results, maintains application memory, and renders streaming output | Web/mobile application, device service, desktop client, embedded Agent framework |
+| **Agent Runtime** | Owns the Agent loop outside the Agent server: sends messages, executes requested tools, returns tool results, maintains application memory, and renders streaming output | Web/mobile application, device service, desktop client, embedded Agent framework |
 
 `Vertical Agents` and `General Agent` are parallel application types. Both use
 the same `Agent Runtime`, which communicates with the server over HTTP. The
