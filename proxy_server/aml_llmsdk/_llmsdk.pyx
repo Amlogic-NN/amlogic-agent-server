@@ -53,6 +53,35 @@ _SAMPLING_MODE_MAP.update({
     SamplingMode.CHAIN_SAMPLER:  AML_LLM_CHAIN_SAMPLER,
 })
 
+def as_rgb888(image):
+    """Normalize an image to H×W×3 uint8 RGB — the SDK's RGB888 buffer layout.
+
+    ``llmsdk.h`` (``AML_LLM_IMAGE_TYPE_BUFFER``) wants a tightly packed RGB888
+    buffer: ``width * height * 3`` bytes, RGB order, no row padding; the SDK
+    does the image preprocessing itself, so nothing else may be applied here.
+
+    Accepts HWC or CHW input, ``uint8`` (0..255) or float, and returns a C
+    contiguous ``uint8`` array. Float input is assumed normalized to 0..1
+    (values above 1 are treated as 0..255).
+    """
+    array = np.asarray(image)
+    if array.ndim != 3:
+        raise ValueError(
+            f"Image must be 3D (H,W,C) or (C,H,W), got shape {array.shape}")
+    if array.shape[0] == 3 and array.shape[2] != 3:
+        array = np.transpose(array, (1, 2, 0))  # CHW -> HWC
+    if array.shape[2] == 4:
+        array = array[:, :, :3]                 # drop alpha
+    if array.shape[2] != 3:
+        raise ValueError(
+            f"Image must have 3 colour channels (RGB), got shape {array.shape}")
+    if array.dtype != np.uint8:
+        if array.dtype.kind == "f" and array.size and float(array.max()) <= 1.0 + 1e-6:
+            array = array * 255.0
+        array = np.clip(array, 0, 255).astype(np.uint8)
+    return np.ascontiguousarray(array, dtype=np.uint8)
+
+
 cdef AML_LLMSamplingMode _normalize_sampling_mode(object mode) except *:
     """Coerce a sampling mode from str, int, or SamplingMode to the C enum."""
     if isinstance(mode, SamplingMode):
@@ -710,7 +739,7 @@ cdef class LLMSDK:
 
         cdef object img_arr
         cdef int img_h, img_w
-        cdef float[:, :, ::1] img_memview
+        cdef const unsigned char[:, :, ::1] img_memview
         cdef bytes _b_img_start, _b_img_end, _b_img_content
         cdef int _n_images, _img_idx
         cdef AML_LLMImageInput* _image_inputs = NULL
@@ -769,21 +798,13 @@ cdef class LLMSDK:
                 c_prompt = NULL
 
             for _img_idx in range(_n_images):
-                img_arr = np.asarray(images[_img_idx], dtype=np.float32)
-                if img_arr.ndim != 3:
-                    raise ValueError(f"Image must be 3D (C,H,W) or (H,W,C), got shape {img_arr.shape}")
-                # SDK tensor input expects HWC float32 (per test_vlm_input.cpp).
-                # Normalize NCHW (3,H,W) -> HWC (H,W,3); keep HWC as-is.
-                if img_arr.shape[0] == 3 and img_arr.shape[0] != img_arr.shape[2]:
-                    img_arr = np.ascontiguousarray(np.transpose(img_arr, (1, 2, 0)))
-                else:
-                    img_arr = np.ascontiguousarray(img_arr)
+                img_arr = as_rgb888(images[_img_idx])
                 _img_refs.append(img_arr)
                 img_memview = img_arr
                 img_h = img_arr.shape[0]
                 img_w = img_arr.shape[1]
 
-                _image_inputs[_img_idx].type = AML_LLM_IMAGE_TYPE_TENSOR
+                _image_inputs[_img_idx].type = AML_LLM_IMAGE_TYPE_BUFFER
                 _image_inputs[_img_idx].data = <const void*>&img_memview[0, 0, 0]
                 _image_inputs[_img_idx].width = <uint32_t>img_w
                 _image_inputs[_img_idx].height = <uint32_t>img_h
@@ -796,7 +817,7 @@ cdef class LLMSDK:
             if len(_b_img_content) > 0:
                 c_img_content = _b_img_content
 
-            c_input.input_type = AML_LLM_INPUT_MULTIMODAL
+            c_input.input_type = AML_LLM_INPUT_MESSAGES
             c_input.multimodal_input.prompt = c_prompt
             c_input.multimodal_input.img_inputs = _image_inputs
             c_input.multimodal_input.img_count = <uint32_t>_n_images

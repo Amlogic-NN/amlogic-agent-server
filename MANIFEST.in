@@ -1,2 +1,3 @@
 include proxy_server/aml_llmsdk/*.h proxy_server/aml_llmsdk/*.hpp
 include amlllm_openai_server/aml_llmsdk/libllmsdk.so
+include amlllm_openai_server/aml_llmsdk/libasrsdk.so

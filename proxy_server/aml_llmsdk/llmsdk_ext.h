@@ -260,4 +260,6 @@ AML_LLMRetStatus aml_llm_set_toolcall_callback(LLMContext context, LLM_ToolUseCa
 }
 #endif
 
+#include "asrsdk.h"
+
 #endif

@@ -17,6 +17,19 @@ import queue
 import os
 import time
 
+
+def _json_default(obj: object) -> object:
+    """Serialize pydantic models (and anything else) for debug logging.
+
+    ``preprocess_vlm_image`` returns a list whose items are either ``ChatMessage``
+    objects or lists of ``MessagePart``, so a plain ``model_dump()`` loop breaks
+    as soon as an image is present.
+    """
+    dump = getattr(obj, "model_dump", None)
+    if callable(dump):
+        return dump()
+    return str(obj)
+
 try:
     from .aml_llmsdk import LLMSDK
     from .aml_llmsdk.types import Result, RunStatus
@@ -410,43 +423,17 @@ class AmlLlmModelRuntime(BaseModelRuntime):
             delta_messages = self._detect_continuation(messages)
 
             # --- Extract and preprocess images for VLM ---
-            vlm_images = extract_images_from_messages(messages)
-            preprocessed_images = []
-            if vlm_images and self.config.mmproj_path and self.client.mmproj_model:
-                # Get vision metadata from C layer (populated at init time).
-                vis_meta = {}
-                try:
-                    vis_meta = self.client.vision_metadata if hasattr(self.client, 'vision_metadata') else {}
-                except Exception:
-                    pass
 
-                # Determine projector type: primary source is vision_metadata,
-                # fallback to model.json metadata.
-                projector_type = vis_meta.get("projector_type", "")
-                if not projector_type:
-                    projector_type = self.config.metadata.get("projector_type", "")
-                if not projector_type:
-                    logger.warning("No projector_type found in vision_metadata or model.json; cannot preprocess images")
-                else:
-                    projector = get_projector(projector_type, vis_meta)
-                    logger.debug("Using projector: %s (image_size=%d, patch_size=%d)",
-                                 projector_type, projector.image_size, projector.patch_size)
-                    for img in vlm_images:
-                        pp = projector.preprocess(img)
-                        preprocessed_images.append(pp)
-                    logger.debug("Preprocessed %d images for VLM", len(preprocessed_images))
-            elif vlm_images and not self.config.mmproj_path:
+            vlm_images, preprocessed_message = extract_images_from_messages(messages if delta_messages is None else delta_messages)
+            if vlm_images and not self.config.mmproj_path:
                 logger.warning("Images in request but no mmproj_path configured; ignoring images")
 
-            # # Add VLM tokens to template kwargs
-            # if preprocessed_images:
-            #     template_kwargs.setdefault("image_pad", self.config.image_pad)
-            #     template_kwargs.setdefault("vision_start", self.config.vision_start)
-            #     template_kwargs.setdefault("vision_end", self.config.vision_end)
+            logger.debug('Messages for prompt building: %s', json.dumps(preprocessed_message, ensure_ascii=False, indent=2, default=_json_default))
 
             sdk_render = False
-            if self._chat_template_str:
-                template_kwargs.update(self.config.template_kwargs) # Make a copy to avoid mutating the input
+            template_kwargs.update(self.config.template_kwargs) 
+            if not self._tokenizer_config.get('sdk_render', True) and self._chat_template_str:
+                # Make a copy to avoid mutating the input
                 # --- Python renders the Jinja2 chat template (disable_chat_template=1) ---
                 if delta_messages is not None:
                     logger.debug("Continuation detected, use cached KV cache with Jinja2 template (python render)")
@@ -485,13 +472,18 @@ class AmlLlmModelRuntime(BaseModelRuntime):
                 # SDK and let it render the chat template
                 # (AML_LLM_INPUT_MESSAGES + disable_chat_template=0). ---
                 sdk_render = True
+                # The SDK renders the template, so it must receive the messages
+                # where every decoded image is the "@bin:<n>" placeholder that
+                # matches the `images` argument — also on a new chat (passing
+                # the raw messages would hand it the base64 data URI instead).
                 if delta_messages is not None:
                     logger.debug("Continuation detected, passing delta messages JSON to SDK for template rendering")
-                    msgs_for_template = messages_to_llama_cpp(delta_messages, "")
+                    msgs_for_template = messages_to_llama_cpp(preprocessed_message, "")
                 else:
                     logger.debug("New chat detected, cleaning KV cache, passing messages JSON to SDK for template rendering")
                     self.client.reset()
-                    msgs_for_template = messages_to_llama_cpp(messages, None)
+                    msgs_for_template = messages_to_llama_cpp(preprocessed_message, None)
+                # Must stay legal JSON: the SDK parses this as the messages input.
                 prompt = json.dumps(msgs_for_template, ensure_ascii=False)
                 final_system = ""
             self.queue = stream_queue
@@ -552,12 +544,13 @@ class AmlLlmModelRuntime(BaseModelRuntime):
                     prompt_input=prompt,
                     retain_history=True,
                     userdata=user_data,
-                    images=preprocessed_images if preprocessed_images else None,
+                    images=vlm_images if vlm_images else None,
                     img_content=self.config.image_pad,
                     disable_chat_template=0 if sdk_render else 1,
                     messages_mode=sdk_render,
                     tool_schemas=normalized_tools if normalized_tools else None,
                     sampler_params=run_sampler_params if run_sampler_params else None,
+                    extra_template_params=template_kwargs if sdk_render and template_kwargs else None,
                 )
                 self.decode_end = time.perf_counter()
                 if self.generated_text:

@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import queue
+import tempfile
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -21,14 +23,15 @@ import traceback
 
 import httpx
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse, RedirectResponse
-from .types import ModelConfig, ServerConfig, ChatCompletionRequest, RoutedResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse, RedirectResponse
+from .types import ModelConfig, ServerConfig, ChatCompletionRequest, RoutedResponse, is_asr_model
 from .model_runtime import BaseModelRuntime
 from .tools_hook import  get_url, set_base_url
 from .aml_runtime import AmlLlmModelRuntime
 from .llamacpp_runtime import LlamaCppModelRuntime
+from .asr_runtime import AsrModelRuntime
 from .llm_utils import resolve_path, load_model, estimate_token_count, inject_skills_for_forwarding
 
 
@@ -70,6 +73,7 @@ def load_proxy_config(config_path: str) -> Tuple[ServerConfig, list[ModelConfig]
         skill_injection=bool(upstream_raw.get("skill_injection", False)),
         force_upstream=bool(upstream_raw.get("force_upstream", False)),
         cors_origins=str(server_raw_cors) if server_raw_cors else "*",
+        reject_when_busy=bool(models_raw.get("reject_when_busy", True)),
     )
 
     models = []
@@ -79,6 +83,29 @@ def load_proxy_config(config_path: str) -> Tuple[ServerConfig, list[ModelConfig]
             model_dir = root_dir / model_dir
         models.append(load_model(model_dir.resolve()))
     return server, models
+
+
+# Streaming loop cadence: poll the client for a disconnect often enough to stop
+# an abandoned run promptly, but keep the SSE keep-alive cadence as before.
+STREAM_POLL_INTERVAL = 0.2         # seconds between disconnect polls / queue reads
+STREAM_HEARTBEAT_INTERVAL = 10.0   # seconds between empty-delta keep-alives
+
+
+def _client_disconnected(http_request: Request) -> bool:
+    """Best-effort client-disconnect check from a *sync* streaming generator.
+
+    ``Request.is_disconnected()`` is a coroutine, and this generator is sync, so
+    it cannot be awaited directly — calling it without awaiting returns a
+    (always truthy) coroutine object. Starlette iterates sync generators in an
+    anyio worker thread, where ``anyio.from_thread.run`` can await it; outside
+    such a thread we fall back to the ``_is_disconnected`` flag Starlette sets
+    when an awaited check saw ``http.disconnect``.
+    """
+    try:
+        import anyio
+        return bool(anyio.from_thread.run(http_request.is_disconnected))
+    except Exception:
+        return bool(getattr(http_request, "_is_disconnected", False))
 
 
 class EnumEncoder(json.JSONEncoder):
@@ -94,9 +121,12 @@ class ProxyRuntime:
     def __init__(self, models: List[ModelConfig], server_config: ServerConfig):
         self.server_config = server_config
         self.api_key = server_config.api_key
-        self.models = {model.name: _create_model_runtime(model) for model in models}
+        llm_models = [model for model in models if not is_asr_model(model.model_type)]
+        asr_models = [model for model in models if is_asr_model(model.model_type)]
+        self.models = {model.name: _create_model_runtime(model) for model in llm_models}
+        self.asr_models = {model.name: AsrModelRuntime(model) for model in asr_models}
         self.model_configs = {model.name: model for model in models}
-        if not self.models:
+        if not self.models and not self.asr_models:
             raise ValueError("No models configured")
 
     def authorize(self, authorization: Optional[str]):
@@ -106,10 +136,26 @@ class ProxyRuntime:
             raise HTTPException(status_code=401, detail="Invalid API key")
 
     def get_model(self, model_name: str) -> BaseModelRuntime:
+        if model_name in self.asr_models:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model {model_name} is ASR; use POST /v1/audio/transcriptions",
+            )
         model = self.models.get(model_name)
         if model is None:
             raise HTTPException(status_code=404, detail=f"Unknown model: {model_name}")
         return model
+
+    def get_asr_model(self, model_name: str) -> AsrModelRuntime:
+        asr = self.asr_models.get(model_name)
+        if asr is not None:
+            return asr
+        if model_name in self.models:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model {model_name} is not an ASR model",
+            )
+        raise HTTPException(status_code=404, detail=f"Unknown model: {model_name}")
 
     def list_models(self) -> List[dict]:
         created = now_ts()
@@ -400,6 +446,11 @@ def create_app(config_path: str,
                     model.interrupt()
                 except Exception:
                     pass
+            for asr in runtime.asr_models.values():
+                try:
+                    asr.close()
+                except Exception:
+                    pass
 
     app = FastAPI(title=server_config.title, version=server_config.version, lifespan=lifespan)
 
@@ -428,8 +479,61 @@ def create_app(config_path: str,
         runtime.authorize(authorization)
         return {"object": "list", "data": runtime.list_models()}
 
+    @app.post("/v1/audio/transcriptions")
+    def audio_transcriptions(
+        file: UploadFile = File(...),
+        model: str = Form(...),
+        language: Annotated[Optional[str], Form()] = None,
+        task: Annotated[Optional[str], Form()] = None,
+        response_format: Annotated[Optional[str], Form()] = "json",
+        authorization: Annotated[Optional[str], Header()] = None,
+    ):
+        runtime.authorize(authorization)
+        asr = runtime.get_asr_model(model)
+        # One session per model: a transcription cannot be cancelled by the SDK,
+        # so a second request while one is running is rejected instead of queued.
+        reserved = False
+        if runtime.server_config.reject_when_busy:
+            reserved = asr.try_begin()
+            if not reserved:
+                logger.info("Model %s is busy; rejecting transcription with 429", model)
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Model {model} is busy (one session per model)")
+        suffix = Path(file.filename or "audio.wav").suffix or ".wav"
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+                tmp_path = tmp.name
+                while True:
+                    chunk = file.file.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    tmp.write(chunk)
+            if not tmp_path or os.path.getsize(tmp_path) == 0:
+                raise HTTPException(status_code=400, detail="Empty audio file")
+            result = asr.transcribe(tmp_path, language=language, task=task)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error(str(exc) + "\n" + traceback.format_exc())
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        finally:
+            if reserved:
+                asr.end()
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+        fmt = (response_format or "json").lower()
+        if fmt == "text":
+            return PlainTextResponse(result.get("text") or "")
+        return JSONResponse({"text": result.get("text") or ""})
+
     @app.post("/v1/chat/completions")
-    def chat_completions(request: ChatCompletionRequest,
+    def chat_completions(http_request: Request,
+                         request: ChatCompletionRequest,
                          user_agent: Annotated[str | None, Header()] = None,
                          authorization: Annotated[Optional[str], Header()] = None,
                          ):
@@ -471,6 +575,17 @@ def create_app(config_path: str,
                     "usage": upstream_result.get("usage", {}),
                 })
 
+        # --- one session per model: reserve it, or answer 429 ---
+        reserved = False
+        if runtime.server_config.reject_when_busy:
+            reserved = model.try_begin()
+            if not reserved:
+                logger.info("Model %s is busy; rejecting request %s with 429",
+                            request.model, request.model)
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Model {request.model} is busy (one session per model)")
+
         if request.stream:
             token_queue: "queue.Queue[object]" = queue.Queue()
             request_id = f"chatcmpl-{uuid.uuid4().hex}"
@@ -507,13 +622,31 @@ def create_app(config_path: str,
                         logger.error("Upstream forwarding failed for %s: %s", request_id, str(exc))
                         token_queue.put(("error", str(exc)))
                 except Exception as exc:
-                    logger.error("Streaming worker failed for %s: %s", request_id, str(exc))
+                    logger.error("Streaming worker failed for %s: %s\n Traceback: %s", request_id, str(exc), traceback.format_exc())
                     token_queue.put(("error", str(exc)))
                 finally:
+                    if reserved:
+                        model.end()          # release the per-model session
                     logger.debug("Streaming worker finished for %s, finish_reason=%s", request_id, model.finish_reason)
                     token_queue.put(("done", model.finish_reason))
 
             threading.Thread(target=worker, daemon=True).start()
+
+            # A client that goes away must not keep the model busy: Starlette
+            # cancels (and closes) this generator on disconnect, so the run is
+            # interrupted both when we notice the disconnect and on any early
+            # teardown of the generator.
+            stream_state = {"finished": False, "interrupted": False}
+
+            def stop_run(reason: str) -> None:
+                if stream_state["interrupted"]:
+                    return
+                stream_state["interrupted"] = True
+                logger.info("Interrupting the run for %s (%s)", request_id, reason)
+                try:
+                    model.interrupt()
+                except Exception as exc:  # never mask the original reason
+                    logger.warning("interrupt for %s failed: %s", request_id, exc)
 
             def event_stream():
                 logger.info("Streaming response started for %s (model=%s)", request_id, request.model)
@@ -532,16 +665,27 @@ def create_app(config_path: str,
                     }],
                 })
                 started = True
+                last_heartbeat = time.monotonic()
                 while True:
+                    if _client_disconnected(http_request):
+                        logger.info("Client disconnected, stopping streaming for %s", request_id)
+                        # Stop the running inference, not just the response: the
+                        # model stays busy (and answers 429) until the SDK run
+                        # returns, so an abandoned client must not hold the session.
+                        stop_run("client disconnected")
+                        break
                     try:
-                        item_type, value = token_queue.get(timeout=10.0)
+                        item_type, value = token_queue.get(timeout=STREAM_POLL_INTERVAL)
                         logger.debug("event_stream got item_type=%s for %s", item_type, request_id)
                     except queue.Empty:
-                        empty_delta_count += 1
-                        if empty_delta_count == 1 or empty_delta_count % 10 == 0:
-                            logger.debug("event_stream idle (queue empty x%d) for %s", empty_delta_count, request_id)
-                        if started:
-                            yield _sse_empty_delta(request_id, created, request.model)
+                        now = time.monotonic()
+                        if now - last_heartbeat >= STREAM_HEARTBEAT_INTERVAL:
+                            last_heartbeat = now
+                            empty_delta_count += 1
+                            logger.debug("event_stream idle (no token for %.0fs) for %s",
+                                         STREAM_HEARTBEAT_INTERVAL, request_id)
+                            if started:
+                                yield _sse_empty_delta(request_id, created, request.model)
                         continue
                     if item_type == "token":
                         token_streamed = True
@@ -636,6 +780,7 @@ def create_app(config_path: str,
                                 })
                         continue
                     if item_type == "done":
+                        stream_state["finished"] = True
                         logger.info("Streaming completed for %s, finish_reason=%s", request_id, value or "stop")
                         yield _sse({
                             "id": request_id,
@@ -651,7 +796,15 @@ def create_app(config_path: str,
                         yield "data: [DONE]\n\n"
                         return
 
-            return StreamingResponse(event_stream(), media_type="text/event-stream")
+            def stream_with_teardown():
+                """Close the run when the response ends before ``[DONE]``."""
+                try:
+                    yield from event_stream()
+                finally:
+                    if not stream_state["finished"]:
+                        stop_run("response ended before the run finished")
+
+            return StreamingResponse(stream_with_teardown(), media_type="text/event-stream")
 
         try:
             result = model.run(
@@ -699,5 +852,8 @@ def create_app(config_path: str,
         except Exception as exc:
             logger.error(str(exc) + "\n" + traceback.format_exc())
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+        finally:
+            if reserved:
+                model.end()                  # release the per-model session
 
     return app, server_config

@@ -1,1 +1,2 @@
 amlllm_openai_server/aml_llmsdk/libllmsdk.so filter=lfs diff=lfs merge=lfs -text
+amlllm_openai_server/aml_llmsdk/libasrsdk.so filter=lfs diff=lfs merge=lfs -text

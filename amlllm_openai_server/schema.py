@@ -181,7 +181,7 @@ class TestCaseEntry(BaseModel):
     tools: Optional[list[dict]] = None
     """Shared tool definitions for all conversations in this entry."""
 
-    max_tokens: int = 1024
+    max_tokens: int = 4096
     """Maximum generation tokens shared across conversations."""
 
     temperature: Optional[float] = None

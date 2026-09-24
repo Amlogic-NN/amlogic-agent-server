@@ -1,0 +1,12 @@
+{
+  "id": "sensevoice-small",
+  "model_type": "sensevoice",
+  "backend": "adla",
+  "weights": "sensevoice_small_w8a16.adla",
+  "tokenizer": "tokens.txt",
+  "language": "auto",
+  "metadata": {
+    "family": "sensevoice",
+    "task": "asr"
+  }
+}

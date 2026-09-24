@@ -1,0 +1,13 @@
+{
+  "id": "whisper-large-v3-turbo",
+  "model_type": "whisper",
+  "backend": "adla",
+  "weights": "whisper_turbo_encoder_w4a16.adla",
+  "decoder": "whisper_turbo_decoder_w4a16.adla",
+  "tokenizer": "data_bin",
+  "language": "auto",
+  "metadata": {
+    "family": "whisper",
+    "task": "asr"
+  }
+}

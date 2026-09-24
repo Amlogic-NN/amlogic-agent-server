@@ -1,0 +1,13 @@
+{
+  "id": "amlogic-default",
+  "weights": "Qwen3-4B-Instruct-2507-Q4AM_PB32.adla",
+  "model_type": "qwen",
+  "sampling_mode": "chain",
+  "sampler_params": {"temp": 0.7, "top_p": 0.85, "top_k": 40, "penalty_repeat": 1.15},
+  "retain_history": true,
+  "loglevel": "ERROR",
+  "metadata": {
+    "family": "default",
+    "device": "amlogic"
+  }
+}

@@ -9,11 +9,11 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple, Union, Any
 from json_repair import repair_json
 import jsonschema
-from .types import MessagePart
+from .types import MessagePart, ImageURL
 
 
 from fastapi import  HTTPException
-from .types import ModelConfig, ChatMessage, ChatCompletionTool
+from .types import ModelConfig, ChatMessage, ChatCompletionTool, is_asr_model
 from .tools_hook import get_tool_hook
 
 logger = logging.getLogger("llm.utils")
@@ -80,13 +80,24 @@ def load_model(model_dir: Path) -> ModelConfig:
 
     # Read sampler_params: prefer `sampler_params` key, fall back to legacy individual keys.
     sampler_params = _read_sampler_params(config)
+    model_type = str(config.get("model_type", "none"))
+    decoder = config.get("decoder") or ""
+    asr_extra_json = _asr_extra_json(config, model_dir)
+    default_language = str(config.get("language", ""))
+    if is_asr_model(model_type):
+        if not tokenizer:
+            raise ValueError("ASR model.json requires tokenizer (tokens.txt or data_bin)")
+        if model_type.lower() == "whisper" and not decoder:
+            raise ValueError("whisper model.json requires decoder")
+        if not default_language:
+            default_language = "auto"
 
     return ModelConfig(
         name=str(config.get("id") or config.get("name") or model_dir.name),
         model_path=resolve_path(model_dir, str(config.get("weights", "weights.bin"))),
         tokenizer_path=resolve_path(model_dir, str(tokenizer)) if tokenizer else "",
         backend=str(config.get("backend", "adla")).lower(),
-        model_type=str(config.get("model_type", "none")),
+        model_type=model_type,
         sampling_mode=str(config.get("sampling_mode", "chain_sampler")),
         sampler_params=sampler_params,
         system_prompt=str(config.get("system_prompt", "")),
@@ -98,7 +109,7 @@ def load_model(model_dir: Path) -> ModelConfig:
         context_size=int(config.get("context_size", 4096)),
         threads=int(config.get("threads", 0)),
         n_gpu_layers=int(config.get("n_gpu_layers", 0)),
-        chat_format=str(config.get("chat_format", "")),
+        chat_format=config.get("chat_format", ""),
         verbose=bool(config.get("verbose", False)),
         metadata=dict(config.get("metadata", {})),
         skill_workaround=bool(config.get("skill_workaround", False)),
@@ -110,7 +121,38 @@ def load_model(model_dir: Path) -> ModelConfig:
         vision_start=str(config.get("vision_start", "<|vision_start|>")),
         vision_end=str(config.get("vision_end", "<|vision_end|>")),
         image_pad=str(config.get("image_pad", "<|image_pad|>")),
+        decoder_path=resolve_path(model_dir, str(decoder)) if decoder else "",
+        asr_extra_json=asr_extra_json,
+        language=default_language,
     )
+
+
+_ASR_EXTRA_KEYS = (
+    "use_itn",
+    "swap_int_inputs",
+    "max_frames",
+    "decode_extra_frames",
+    "pad_mode",
+    "textnorm",
+    "n_threads",
+    "filters_path",
+)
+
+
+def _asr_extra_json(config: dict, model_dir: Path) -> str:
+    extra: dict[str, object] = {}
+    nested = config.get("asr")
+    if isinstance(nested, dict):
+        extra.update(nested)
+    for key in _ASR_EXTRA_KEYS:
+        if key in config:
+            extra[key] = config[key]
+    filters = extra.get("filters_path")
+    if isinstance(filters, str) and filters:
+        extra["filters_path"] = resolve_path(model_dir, filters)
+    if not extra:
+        return ""
+    return json.dumps(extra, ensure_ascii=False)
 
 
 def builtin_template(model_type: str) -> Tuple[str, str, str]:
@@ -616,18 +658,24 @@ def messages_to_llama_cpp(messages: list[ChatMessage], default_system: Optional[
     return normalized
 
 
-def extract_images_from_messages(messages: list[ChatMessage]) -> list[np.ndarray]:
+def extract_images_from_messages(messages: list[ChatMessage]) -> tuple[list[np.ndarray], list[ChatMessage]]:
     """Extract images from chat messages.
 
     Parses message.content (which can be a list of MessagePart) for parts
     with type == "image_url". Downloads or decodes the image data into
-    numpy uint8 RGB arrays.
+    numpy uint8 RGB arrays, and replaces the URL of every decoded image with
+    the ``@bin:<n>`` placeholder the SDK resolves against the ``images``
+    argument (the SDK renders the chat template itself, so the placeholder has
+    to stay in the messages).
 
     Args:
         messages: List of ChatMessage objects.
 
     Returns:
-        List of numpy arrays (H×W×3, uint8, RGB). Empty if no images found.
+        ``(images, messages)``: numpy arrays (H×W×3, uint8, RGB) in placeholder
+        order, and the same messages with image URLs replaced. Every returned
+        item is a ``ChatMessage`` (never a bare list of parts), and messages
+        without a list content are passed through untouched.
     """
     import base64
     import io
@@ -635,19 +683,22 @@ def extract_images_from_messages(messages: list[ChatMessage]) -> list[np.ndarray
         from PIL import Image
     except ImportError:
         logger.error("Pillow is required for image processing. Install with: pip install Pillow")
-        return []
+        return [], list(messages)
 
-    images = []
+    images: list[np.ndarray] = []
+    message_out: list[ChatMessage] = []
+    cur_image_id = 0
 
     for message in messages:
         content = message.content
         if not isinstance(content, list):
+            message_out.append(message)
             continue
-
+        out_parts = []
         for part in content:
-            if not isinstance(part, MessagePart):
-                continue
-            if part.type != "image_url":
+            if not isinstance(part, MessagePart) or part.type != "image_url":
+                # text parts (and anything unexpected) stay as they are
+                out_parts.append(part)
                 continue
 
             image_url = part.image_url if hasattr(part, "image_url") else part.get("image_url", {}) if isinstance(part, dict) else {}
@@ -659,6 +710,7 @@ def extract_images_from_messages(messages: list[ChatMessage]) -> list[np.ndarray
                 url = str(image_url)
 
             if not url:
+                # Empty URL, skip this part.
                 continue
 
             img = None
@@ -687,6 +739,10 @@ def extract_images_from_messages(messages: list[ChatMessage]) -> list[np.ndarray
                 except Exception as exc:
                     logger.warning("Failed to load image from %s: %s", url, exc)
                     continue
+            elif url.startswith("@bin:"):
+                # already a placeholder (e.g. a continuation round)
+                out_parts.append(part)
+                continue
             else:
                 logger.warning("Unsupported image URL scheme: %s", url[:50])
                 continue
@@ -694,13 +750,17 @@ def extract_images_from_messages(messages: list[ChatMessage]) -> list[np.ndarray
             if img is None:
                 continue
 
-            # Convert to RGB numpy array.
+            # Convert to RGB numpy array and reference it by placeholder.
             img = img.convert("RGB")
             arr = np.array(img, dtype=np.uint8)
             images.append(arr)
-            logger.debug("Extracted image: shape=%s", arr.shape)
+            out_parts.append(MessagePart(type="image_url",
+                                         image_url=ImageURL(url=f"@bin:{cur_image_id}")))
+            cur_image_id += 1
+            logger.debug("Extracted image: shape=%s -> @bin:%d", arr.shape, cur_image_id - 1)
+        message_out.append(message.model_copy(update={"content": out_parts}))
 
-    return images
+    return images, message_out
 
 
 def preprocess_vlm_image(
@@ -779,7 +839,41 @@ def preprocess_vlm_image(
     return chw
 
 
-def parse_tokenizer_config(chat_format: str) -> dict:
+def normalize_tokenizer_config(tokenizer_config: dict) -> dict:
+    """Normalize tokenizer_config dict to have consistent keys.
+
+    Ensures that the returned dict has:
+        - chat_template: str
+        - bos_token: str
+        - eos_token: str
+        - sdk_render: bool
+
+    Args:
+        tokenizer_config: Input dict from model.json or tokenizer_config.json.
+
+    Returns:
+        Normalized dict with consistent keys.
+    """
+    if not isinstance(tokenizer_config, dict):
+        return {}
+
+    normalized = {}
+    normalized["chat_template"] = str(tokenizer_config.get("chat_template", ""))
+    normalized["bos_token"] = str(tokenizer_config.get("bos_token", ""))
+    normalized["eos_token"] = str(tokenizer_config.get("eos_token", ""))
+    normalized["sdk_render"] = bool(tokenizer_config.get("sdk_render", True))
+    if normalized["chat_template"].startswith('@'):
+        # If chat_template is a file path, read its content.
+        template_path = Path(normalized["chat_template"][1:])
+        if template_path.exists() and template_path.is_file():
+            try:
+                with template_path.open("r", encoding="utf-8") as f:
+                    normalized["chat_template"] = f.read()
+            except Exception as exc:
+                logger.warning("Failed to read chat_template from %s: %s", template_path, exc)
+    return normalized
+
+def parse_tokenizer_config(chat_format: str | dict) -> dict:
     """Parse config.chat_format into a dict with chat_template, bos_token, eos_token.
 
     Supports:
@@ -790,6 +884,9 @@ def parse_tokenizer_config(chat_format: str) -> dict:
     if not chat_format:
         return {}
 
+    if isinstance(chat_format, dict):
+        return normalize_tokenizer_config(chat_format)
+
     # Try as file path
     try:
         path = Path(chat_format)
@@ -797,7 +894,7 @@ def parse_tokenizer_config(chat_format: str) -> dict:
             with path.open("r", encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, dict):
-                return data
+                return normalize_tokenizer_config(data)
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         pass
 
@@ -805,7 +902,7 @@ def parse_tokenizer_config(chat_format: str) -> dict:
     try:
         data = json.loads(chat_format)
         if isinstance(data, dict):
-            return data
+            return normalize_tokenizer_config(data)
     except json.JSONDecodeError:
         pass
 

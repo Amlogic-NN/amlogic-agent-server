@@ -23,7 +23,7 @@ class ModelConfig:
     context_size: int = 4096
     threads: int = 0
     n_gpu_layers: int = 0
-    chat_format: str = ""
+    chat_format: str | dict[str, object] = ""
     verbose: bool = False
     metadata: dict[str, object] = field(default_factory=dict)
     skill_workaround: bool = False
@@ -35,6 +35,14 @@ class ModelConfig:
     vision_start: str = "<|vision_start|>"
     vision_end: str = "<|vision_end|>"
     image_pad: str = "<|image_pad|>"
+    # ASR (Whisper / SenseVoice). decoder_path is Whisper decoder.adla.
+    decoder_path: str = ""
+    asr_extra_json: str = ""
+    language: str = ""
+
+
+def is_asr_model(model_type: str) -> bool:
+    return (model_type or "").lower() in ("whisper", "sensevoice")
 
 
 @dataclass
@@ -51,6 +59,9 @@ class ServerConfig:
     skill_injection: bool = False
     force_upstream: bool = False
     cors_origins: str = "*"
+    # One session per model: while a model is running, a new request for that
+    # model gets 429 instead of waiting for it (models.reject_when_busy).
+    reject_when_busy: bool = True
 
 
 @dataclass

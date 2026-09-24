@@ -124,7 +124,9 @@ class LLMSDK:
             run_mode: Inference mode (e.g., ``RunMode.GENERATE``).
             retain_history: Whether to retain conversation history (1 = retain, 0 = reset).
             userdata: Arbitrary Python object forwarded to the ``on_token`` callback.
-            images: List of numpy arrays (float32) for multimodal input.
+            images: List of numpy arrays for multimodal input. Each image is
+                normalized to the SDK's RGB888 buffer layout (H×W×3 uint8, RGB
+                order); HWC/CHW and uint8/float (0..1) input are accepted.
             img_start/img_end/img_content: Vision placeholder markers.
             tool_schemas: OpenAI-format tool definitions list (passed as ``run_extend.tools_schemas``).
             sampler_params: Per-run sampling parameter overrides.
