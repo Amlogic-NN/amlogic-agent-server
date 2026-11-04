@@ -294,7 +294,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ```bash
 uv venv --python 3.11
-uv pip install amlllm-openai-server -i <index url>
+uv pip install amlllm-openai-server -i https://pypi.org/simple/
 ```
 
 ### Bootstrap
