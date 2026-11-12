@@ -1,0 +1,57 @@
+# A one-shot CLI over the stock minimal runtime with Skill discovery and Bash.
+- id: sdk-app-startup
+  disabled: true
+- id: sdk-jsonrpc-server
+  disabled: true
+- id: llm-deepseek
+  disabled: true
+- id: system-prompt
+  config:
+    includeHarnessIdentity: false
+    includeRuntimeContext: false
+    personaPrefix: >-
+      You are a helpful assistant with local tools and skills.
+      For a matching task, call skill to load its instructions, then call bash to execute them.
+      Continue until actual execution results or errors are available. Reply briefly with those results.
+- insert:
+    - id: skill
+      name: '@deepseek-ai/dsh-skill'
+    - id: skill-filesystem
+      name: '@deepseek-ai/dsh-skill-filesystem'
+      config:
+        includeDefaultRoots: false
+        customSkillDirs: !!js '[process.env.DSH_SKILLS_DIR]'
+        watch: false
+    - id: tool-skill
+      name: '@deepseek-ai/dsh-tool-skill'
+      config:
+        catalogDescriptionMaxLength: 240
+    - id: llm-pi-ai
+      name: '@deepseek-ai/dsh-llm-pi-ai'
+      config:
+        providers:
+          device:
+            api: openai-completions
+            baseURL: !!js process.env.LLM_BASE_URL
+            apiKeyEnv: LLM_API_KEY
+            reasoning: 'off'
+            retryPolicy:
+              mode: normal
+              maxRetries: 0
+            models:
+              - id: !!js process.env.LLM_MODEL || 'amlogic-default'
+                contextWindow: !!js Number(process.env.LLM_CONTEXT_WINDOW || 8192)
+                maxTokens: !!js Number(process.env.LLM_MAX_TOKENS || 768)
+                reasoningEfforts: false
+    - id: agent-default-model
+      name: '@deepseek-ai/dsh-agent-default-model'
+      config:
+        provider: device
+        model: !!js process.env.LLM_MODEL || 'amlogic-default'
+    - id: headless-startup
+      name: '@deepseek-ai/dsh-headless/startup'
+    - id: headless-runner
+      name: '@deepseek-ai/dsh-headless'
+      inject: [headlessStartup]
+      config:
+        task: !!js ctx.headlessStartup.task

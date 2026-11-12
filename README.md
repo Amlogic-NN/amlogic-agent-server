@@ -5,6 +5,8 @@ Agent applications and OpenAI SDK clients to use an on-device NPU model while
 retaining an optional cloud fallback for requests that exceed local model
 capabilities or context limits.
 
+For reusable on-device skills and Agent integration examples, see [Agent Studio](agent-studio/README.md), including a stock DSH quick start.
+
 The server is designed for **local-first Agent applications**:
 
 - OpenAI-compatible `/v1/chat/completions` API and SSE streaming

@@ -1,0 +1,17 @@
+{
+  "aml-asr": {
+    "skill": "audio-transcription",
+    "entry": "scripts/transcribe_dir.py",
+    "runtime": "python3"
+  },
+  "aml-qrcode": {
+    "skill": "qrcode-reader",
+    "entry": "scripts/read_qrcodes.py",
+    "runtime": "python3"
+  },
+  "aml-yolox": {
+    "skill": "yolox-object-detection",
+    "entry": "scripts/detect.py",
+    "runtime": "python3"
+  }
+}
